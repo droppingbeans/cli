@@ -615,29 +615,41 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 		}
 	}
 
-	// reviewers are requested in yet another additional mutation
-	reviewParams := make(map[string]interface{})
-	if ids, ok := params["userReviewerIds"]; ok && !isBlank(ids) {
-		reviewParams["userIds"] = ids
-	}
-	if ids, ok := params["teamReviewerIds"]; ok && !isBlank(ids) {
-		reviewParams["teamIds"] = ids
-	}
+	// Request reviewers using either login-based (github.com) or ID-based (GHES) mutation
+	userLogins, hasUserLogins := params["userReviewerLogins"].([]string)
+	teamSlugs, hasTeamSlugs := params["teamReviewerSlugs"].([]string)
 
-	//TODO: How much work to extract this into own method and use for create and edit?
-	if len(reviewParams) > 0 {
-		reviewQuery := `
+	if hasUserLogins || hasTeamSlugs {
+		// Use login-based mutation (RequestReviewsByLogin) for github.com
+		err := RequestReviewsByLogin(client, repo, pr.ID, userLogins, nil, teamSlugs, true)
+		if err != nil {
+			return pr, err
+		}
+	} else {
+		// Use ID-based mutation (requestReviews) for GHES compatibility
+		reviewParams := make(map[string]interface{})
+		if ids, ok := params["userReviewerIds"]; ok && !isBlank(ids) {
+			reviewParams["userIds"] = ids
+		}
+		if ids, ok := params["teamReviewerIds"]; ok && !isBlank(ids) {
+			reviewParams["teamIds"] = ids
+		}
+
+		//TODO: How much work to extract this into own method and use for create and edit?
+		if len(reviewParams) > 0 {
+			reviewQuery := `
 		mutation PullRequestCreateRequestReviews($input: RequestReviewsInput!) {
 			requestReviews(input: $input) { clientMutationId }
 		}`
-		reviewParams["pullRequestId"] = pr.ID
-		reviewParams["union"] = true
-		variables := map[string]interface{}{
-			"input": reviewParams,
-		}
-		err := client.GraphQL(repo.RepoHost(), reviewQuery, variables, &result)
-		if err != nil {
-			return pr, err
+			reviewParams["pullRequestId"] = pr.ID
+			reviewParams["union"] = true
+			variables := map[string]interface{}{
+				"input": reviewParams,
+			}
+			err := client.GraphQL(repo.RepoHost(), reviewQuery, variables, &result)
+			if err != nil {
+				return pr, err
+			}
 		}
 	}
 
@@ -1086,6 +1098,100 @@ func SuggestedReviewerActors(client *Client, repo ghrepo.Interface, prID string,
 
 	// Teams: quota = base + unfilled from collaborators
 	teamsQuota := baseQuota + (collaboratorsQuota - collaboratorsAdded)
+	teamsAdded := 0
+	ownerName := repo.RepoOwner()
+	for _, t := range result.Organization.Teams.Nodes {
+		if teamsAdded >= teamsQuota {
+			break
+		}
+		if t.Slug == "" {
+			continue
+		}
+		teamLogin := fmt.Sprintf("%s/%s", ownerName, t.Slug)
+		if !seen[teamLogin] {
+			seen[teamLogin] = true
+			candidates = append(candidates, NewReviewerTeam(ownerName, t.Slug))
+			teamsAdded++
+		}
+	}
+
+	// MoreResults uses unfiltered total counts (teams will be 0 for personal repos)
+	moreResults := result.Repository.CollaboratorsTotalCount.TotalCount + result.Organization.TeamsTotalCount.TotalCount
+
+	return candidates, moreResults, nil
+}
+
+// SuggestedReviewerActorsForRepo fetches potential reviewers for a repository.
+// Unlike SuggestedReviewerActors, this doesn't require an existing PR - used for gh pr create.
+// It combines results from two sources using a cascading quota system:
+// - repository collaborators (base quota: 5)
+// - organization teams (base quota: 5 + unfilled from collaborators)
+//
+// This ensures we show up to 10 total candidates, with each source filling any
+// unfilled quota from the previous source. Results are deduplicated.
+// Returns the candidates, a MoreResults count, and an error.
+func SuggestedReviewerActorsForRepo(client *Client, repo ghrepo.Interface, query string) ([]ReviewerCandidate, int, error) {
+	type responseData struct {
+		Repository struct {
+			Collaborators struct {
+				Nodes []struct {
+					Login string
+					Name  string
+				}
+			} `graphql:"collaborators(first: 10, query: $query)"`
+			CollaboratorsTotalCount struct {
+				TotalCount int
+			} `graphql:"collaboratorsTotalCount: collaborators(first: 0)"`
+		} `graphql:"repository(owner: $owner, name: $name)"`
+		Organization struct {
+			Teams struct {
+				Nodes []struct {
+					Slug string
+				}
+			} `graphql:"teams(first: 10, query: $query)"`
+			TeamsTotalCount struct {
+				TotalCount int
+			} `graphql:"teamsTotalCount: teams(first: 0)"`
+		} `graphql:"organization(login: $owner)"`
+	}
+
+	variables := map[string]interface{}{
+		"query": githubv4.String(query),
+		"owner": githubv4.String(repo.RepoOwner()),
+		"name":  githubv4.String(repo.RepoName()),
+	}
+
+	var result responseData
+	err := client.Query(repo.RepoHost(), "SuggestedReviewerActorsForRepo", &result, variables)
+	// Handle the case where the owner is not an organization - the query still returns
+	// partial data (repository), so we can continue processing.
+	if err != nil && !strings.Contains(err.Error(), errorResolvingOrganization) {
+		return nil, 0, err
+	}
+
+	// Build candidates using cascading quota logic
+	seen := make(map[string]bool)
+	var candidates []ReviewerCandidate
+	const baseQuota = 5
+
+	// Collaborators
+	collaboratorsAdded := 0
+	for _, c := range result.Repository.Collaborators.Nodes {
+		if collaboratorsAdded >= baseQuota {
+			break
+		}
+		if c.Login == "" {
+			continue
+		}
+		if !seen[c.Login] {
+			seen[c.Login] = true
+			candidates = append(candidates, NewReviewerUser(c.Login, c.Name))
+			collaboratorsAdded++
+		}
+	}
+
+	// Teams: quota = base + unfilled from collaborators
+	teamsQuota := baseQuota + (baseQuota - collaboratorsAdded)
 	teamsAdded := 0
 	ownerName := repo.RepoOwner()
 	for _, t := range result.Organization.Teams.Nodes {

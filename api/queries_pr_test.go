@@ -362,3 +362,135 @@ func TestSuggestedReviewerActors(t *testing.T) {
 		})
 	}
 }
+
+// mockReviewerResponseForRepo generates a GraphQL response for SuggestedReviewerActorsForRepo tests.
+// It creates collaborators (c1, c2...) and teams (team1, team2...).
+func mockReviewerResponseForRepo(collabs, teams, totalCollabs, totalTeams int) string {
+	var collabNodes, teamNodes []string
+
+	for i := 1; i <= collabs; i++ {
+		collabNodes = append(collabNodes,
+			fmt.Sprintf(`{"login": "c%d", "name": "C%d"}`, i, i))
+	}
+	for i := 1; i <= teams; i++ {
+		teamNodes = append(teamNodes,
+			fmt.Sprintf(`{"slug": "team%d"}`, i))
+	}
+
+	return fmt.Sprintf(`{
+		"data": {
+			"repository": {
+				"collaborators": {"nodes": [%s]},
+				"collaboratorsTotalCount": {"totalCount": %d}
+			},
+			"organization": {
+				"teams": {"nodes": [%s]},
+				"teamsTotalCount": {"totalCount": %d}
+			}
+		}
+	}`, strings.Join(collabNodes, ","), totalCollabs,
+		strings.Join(teamNodes, ","), totalTeams)
+}
+
+func TestSuggestedReviewerActorsForRepo(t *testing.T) {
+	tests := []struct {
+		name           string
+		httpStubs      func(*httpmock.Registry)
+		expectedCount  int
+		expectedLogins []string
+		expectedMore   int
+		expectError    bool
+	}{
+		{
+			name: "both sources plentiful - 5 each from cascading quota",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(mockReviewerResponseForRepo(6, 6, 20, 10)))
+			},
+			expectedCount:  10,
+			expectedLogins: []string{"c1", "c2", "c3", "c4", "c5", "OWNER/team1", "OWNER/team2", "OWNER/team3", "OWNER/team4", "OWNER/team5"},
+			expectedMore:   30,
+		},
+		{
+			name: "few collaborators - teams fill gap",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(mockReviewerResponseForRepo(2, 10, 2, 15)))
+			},
+			expectedCount:  10,
+			expectedLogins: []string{"c1", "c2", "OWNER/team1", "OWNER/team2", "OWNER/team3", "OWNER/team4", "OWNER/team5", "OWNER/team6", "OWNER/team7", "OWNER/team8"},
+			expectedMore:   17,
+		},
+		{
+			name: "no collaborators - teams only",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(mockReviewerResponseForRepo(0, 10, 0, 20)))
+			},
+			expectedCount:  10,
+			expectedLogins: []string{"OWNER/team1", "OWNER/team2", "OWNER/team3", "OWNER/team4", "OWNER/team5", "OWNER/team6", "OWNER/team7", "OWNER/team8", "OWNER/team9", "OWNER/team10"},
+			expectedMore:   20,
+		},
+		{
+			name: "personal repo - no organization teams",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(`{
+						"data": {
+							"repository": {
+								"collaborators": {"nodes": [{"login": "c1", "name": "C1"}]},
+								"collaboratorsTotalCount": {"totalCount": 3}
+							},
+							"organization": null
+						},
+						"errors": [{"message": "Could not resolve to an Organization with the login of 'OWNER'."}]
+					}`))
+			},
+			expectedCount:  1,
+			expectedLogins: []string{"c1"},
+			expectedMore:   3,
+		},
+		{
+			name: "empty repo",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(mockReviewerResponseForRepo(0, 0, 0, 0)))
+			},
+			expectedCount:  0,
+			expectedLogins: []string{},
+			expectedMore:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &httpmock.Registry{}
+			if tt.httpStubs != nil {
+				tt.httpStubs(reg)
+			}
+
+			client := newTestClient(reg)
+			repo, _ := ghrepo.FromFullName("OWNER/REPO")
+
+			candidates, moreResults, err := SuggestedReviewerActorsForRepo(client, repo, "")
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedCount, len(candidates), "candidate count mismatch")
+			assert.Equal(t, tt.expectedMore, moreResults, "moreResults mismatch")
+
+			logins := make([]string, len(candidates))
+			for i, c := range candidates {
+				logins[i] = c.Login()
+			}
+			assert.Equal(t, tt.expectedLogins, logins)
+		})
+	}
+}

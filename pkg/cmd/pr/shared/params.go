@@ -61,11 +61,14 @@ func AddMetadataToIssueParams(client *api.Client, baseRepo ghrepo.Interface, par
 		return nil
 	}
 
+	// When ActorReviewers is true, we use login-based mutation and don't need to resolve reviewer IDs.
+	needReviewerIDs := len(tb.Reviewers) > 0 && !tb.ActorReviewers
+
 	// Retrieve minimal information needed to resolve metadata if this was not previously cached from additional metadata survey.
 	if tb.MetadataResult == nil {
 		input := api.RepoMetadataInput{
-			Reviewers: len(tb.Reviewers) > 0,
-			TeamReviewers: len(tb.Reviewers) > 0 && slices.ContainsFunc(tb.Reviewers, func(r string) bool {
+			Reviewers: needReviewerIDs,
+			TeamReviewers: needReviewerIDs && slices.ContainsFunc(tb.Reviewers, func(r string) bool {
 				return strings.ContainsRune(r, '/')
 			}),
 			Assignees:      len(tb.Assignees) > 0,
@@ -124,17 +127,34 @@ func AddMetadataToIssueParams(client *api.Client, baseRepo ghrepo.Interface, par
 		}
 	}
 
-	userReviewerIDs, err := tb.MetadataResult.MembersToIDs(userReviewers)
-	if err != nil {
-		return fmt.Errorf("could not request reviewer: %w", err)
-	}
-	params["userReviewerIds"] = userReviewerIDs
+	// When ActorReviewers is true (github.com), pass logins directly for use with
+	// RequestReviewsByLogin mutation. Otherwise, resolve to IDs for GHES compatibility.
+	if tb.ActorReviewers {
+		params["userReviewerLogins"] = userReviewers
+		// Extract team slugs from org/slug format
+		teamSlugs := make([]string, len(teamReviewers))
+		for i, t := range teamReviewers {
+			parts := strings.SplitN(t, "/", 2)
+			if len(parts) == 2 {
+				teamSlugs[i] = parts[1]
+			} else {
+				teamSlugs[i] = t
+			}
+		}
+		params["teamReviewerSlugs"] = teamSlugs
+	} else {
+		userReviewerIDs, err := tb.MetadataResult.MembersToIDs(userReviewers)
+		if err != nil {
+			return fmt.Errorf("could not request reviewer: %w", err)
+		}
+		params["userReviewerIds"] = userReviewerIDs
 
-	teamReviewerIDs, err := tb.MetadataResult.TeamsToIDs(teamReviewers)
-	if err != nil {
-		return fmt.Errorf("could not request reviewer: %w", err)
+		teamReviewerIDs, err := tb.MetadataResult.TeamsToIDs(teamReviewers)
+		if err != nil {
+			return fmt.Errorf("could not request reviewer: %w", err)
+		}
+		params["teamReviewerIds"] = teamReviewerIDs
 	}
-	params["teamReviewerIds"] = teamReviewerIDs
 
 	return nil
 }

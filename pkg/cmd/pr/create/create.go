@@ -21,6 +21,7 @@ import (
 	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -397,9 +398,34 @@ func createRun(opts *CreateOptions) error {
 
 	client := ctx.Client
 
+	// Detect ActorIsAssignable feature to determine if we can use search-based
+	// reviewer selection (github.com) or need to use traditional ID-based selection (GHES)
+	issueFeatures, _ := opts.Detector.IssueFeatures()
+	var reviewerSearchFunc func(string) prompter.MultiSelectSearchResult
+	if issueFeatures.ActorIsAssignable {
+		// Create search function for reviewer selection using login-based API
+		reviewerSearchFunc = func(query string) prompter.MultiSelectSearchResult {
+			candidates, moreResults, err := api.SuggestedReviewerActorsForRepo(client, ctx.PRRefs.BaseRepo(), query)
+			if err != nil {
+				return prompter.MultiSelectSearchResult{Err: err}
+			}
+			keys := make([]string, len(candidates))
+			labels := make([]string, len(candidates))
+			for i, c := range candidates {
+				keys[i] = c.Login()
+				labels[i] = c.DisplayName()
+			}
+			return prompter.MultiSelectSearchResult{Keys: keys, Labels: labels, MoreResults: moreResults}
+		}
+	}
+
 	state, err := NewIssueState(*ctx, *opts)
 	if err != nil {
 		return err
+	}
+
+	if issueFeatures.ActorIsAssignable {
+		state.ActorReviewers = true
 	}
 
 	var openURL string
@@ -568,7 +594,7 @@ func createRun(opts *CreateOptions) error {
 				Repo:      ctx.PRRefs.BaseRepo(),
 				State:     state,
 			}
-			err = shared.MetadataSurvey(opts.Prompter, opts.IO, ctx.PRRefs.BaseRepo(), fetcher, state, projectsV1Support)
+			err = shared.MetadataSurvey(opts.Prompter, opts.IO, ctx.PRRefs.BaseRepo(), fetcher, state, projectsV1Support, reviewerSearchFunc)
 			if err != nil {
 				return err
 			}

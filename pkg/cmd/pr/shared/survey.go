@@ -154,7 +154,7 @@ type RepoMetadataFetcher interface {
 	RepoMetadataFetch(api.RepoMetadataInput) (*api.RepoMetadataResult, error)
 }
 
-func MetadataSurvey(p Prompt, io *iostreams.IOStreams, baseRepo ghrepo.Interface, fetcher RepoMetadataFetcher, state *IssueMetadataState, projectsV1Support gh.ProjectsV1Support) error {
+func MetadataSurvey(p Prompt, io *iostreams.IOStreams, baseRepo ghrepo.Interface, fetcher RepoMetadataFetcher, state *IssueMetadataState, projectsV1Support gh.ProjectsV1Support, reviewerSearchFunc func(string) prompter.MultiSelectSearchResult) error {
 	isChosen := func(m string) bool {
 		for _, c := range state.Metadata {
 			if m == c {
@@ -254,7 +254,19 @@ func MetadataSurvey(p Prompt, io *iostreams.IOStreams, baseRepo ghrepo.Interface
 	}{}
 
 	if isChosen("Reviewers") {
-		if len(reviewers) > 0 {
+		if reviewerSearchFunc != nil {
+			// Use search-based selection (github.com with ActorIsAssignable)
+			selectedReviewers, err := p.MultiSelectWithSearch(
+				"Reviewers",
+				"Search reviewers",
+				state.Reviewers,
+				[]string{},
+				reviewerSearchFunc)
+			if err != nil {
+				return err
+			}
+			values.Reviewers = selectedReviewers
+		} else if len(reviewers) > 0 {
 			selected, err := p.MultiSelect("Reviewers", state.Reviewers, reviewers)
 			if err != nil {
 				return err

@@ -20,6 +20,7 @@ type IssueMetadataState struct {
 
 	Draft          bool
 	ActorAssignees bool
+	ActorReviewers bool
 
 	Body  string
 	Title string

@@ -312,7 +312,7 @@ func createRun(opts *CreateOptions) (err error) {
 				Repo:      baseRepo,
 				State:     &tb,
 			}
-			err = prShared.MetadataSurvey(opts.Prompter, opts.IO, baseRepo, fetcher, &tb, projectsV1Support)
+			err = prShared.MetadataSurvey(opts.Prompter, opts.IO, baseRepo, fetcher, &tb, projectsV1Support, nil)
 			if err != nil {
 				return
 			}
