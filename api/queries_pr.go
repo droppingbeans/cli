@@ -1133,6 +1133,21 @@ func SuggestedReviewerActors(client *Client, repo ghrepo.Interface, prID string,
 func SuggestedReviewerActorsForRepo(client *Client, repo ghrepo.Interface, query string) ([]ReviewerCandidate, int, error) {
 	type responseData struct {
 		Repository struct {
+			// Check for Copilot availability by looking at any open PR's suggested reviewers
+			PullRequests struct {
+				Nodes []struct {
+					SuggestedActors struct {
+						Nodes []struct {
+							Reviewer struct {
+								TypeName string `graphql:"__typename"`
+								Bot      struct {
+									Login string
+								} `graphql:"... on Bot"`
+							}
+						}
+					} `graphql:"suggestedReviewerActors(first: 10)"`
+				}
+			} `graphql:"pullRequests(first: 1, states: [OPEN])"`
 			Collaborators struct {
 				Nodes []struct {
 					Login string
@@ -1173,6 +1188,17 @@ func SuggestedReviewerActorsForRepo(client *Client, repo ghrepo.Interface, query
 	seen := make(map[string]bool)
 	var candidates []ReviewerCandidate
 	const baseQuota = 5
+
+	// Check for Copilot availability from open PR's suggested reviewers
+	for _, pr := range result.Repository.PullRequests.Nodes {
+		for _, actor := range pr.SuggestedActors.Nodes {
+			if actor.Reviewer.TypeName == "Bot" && actor.Reviewer.Bot.Login == CopilotReviewerLogin {
+				candidates = append(candidates, NewReviewerBot(CopilotReviewerLogin))
+				seen[CopilotReviewerLogin] = true
+				break
+			}
+		}
+	}
 
 	// Collaborators
 	collaboratorsAdded := 0

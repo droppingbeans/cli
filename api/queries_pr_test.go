@@ -366,6 +366,12 @@ func TestSuggestedReviewerActors(t *testing.T) {
 // mockReviewerResponseForRepo generates a GraphQL response for SuggestedReviewerActorsForRepo tests.
 // It creates collaborators (c1, c2...) and teams (team1, team2...).
 func mockReviewerResponseForRepo(collabs, teams, totalCollabs, totalTeams int) string {
+	return mockReviewerResponseForRepoWithCopilot(collabs, teams, totalCollabs, totalTeams, false)
+}
+
+// mockReviewerResponseForRepoWithCopilot generates a GraphQL response for SuggestedReviewerActorsForRepo tests.
+// If copilotAvailable is true, includes Copilot in the first open PR's suggested reviewers.
+func mockReviewerResponseForRepoWithCopilot(collabs, teams, totalCollabs, totalTeams int, copilotAvailable bool) string {
 	var collabNodes, teamNodes []string
 
 	for i := 1; i <= collabs; i++ {
@@ -377,9 +383,15 @@ func mockReviewerResponseForRepo(collabs, teams, totalCollabs, totalTeams int) s
 			fmt.Sprintf(`{"slug": "team%d"}`, i))
 	}
 
+	pullRequestsJSON := `"pullRequests": {"nodes": []}`
+	if copilotAvailable {
+		pullRequestsJSON = `"pullRequests": {"nodes": [{"suggestedReviewerActors": {"nodes": [{"reviewer": {"__typename": "Bot", "login": "copilot-pull-request-reviewer"}}]}}]}`
+	}
+
 	return fmt.Sprintf(`{
 		"data": {
 			"repository": {
+				%s,
 				"collaborators": {"nodes": [%s]},
 				"collaboratorsTotalCount": {"totalCount": %d}
 			},
@@ -388,7 +400,7 @@ func mockReviewerResponseForRepo(collabs, teams, totalCollabs, totalTeams int) s
 				"teamsTotalCount": {"totalCount": %d}
 			}
 		}
-	}`, strings.Join(collabNodes, ","), totalCollabs,
+	}`, pullRequestsJSON, strings.Join(collabNodes, ","), totalCollabs,
 		strings.Join(teamNodes, ","), totalTeams)
 }
 
@@ -442,6 +454,7 @@ func TestSuggestedReviewerActorsForRepo(t *testing.T) {
 					httpmock.StringResponse(`{
 						"data": {
 							"repository": {
+								"pullRequests": {"nodes": []},
 								"collaborators": {"nodes": [{"login": "c1", "name": "C1"}]},
 								"collaboratorsTotalCount": {"totalCount": 3}
 							},
@@ -464,6 +477,28 @@ func TestSuggestedReviewerActorsForRepo(t *testing.T) {
 			expectedCount:  0,
 			expectedLogins: []string{},
 			expectedMore:   0,
+		},
+		{
+			name: "copilot available - prepended to candidates",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(mockReviewerResponseForRepoWithCopilot(3, 2, 5, 5, true)))
+			},
+			expectedCount:  6,
+			expectedLogins: []string{"copilot-pull-request-reviewer", "c1", "c2", "c3", "OWNER/team1", "OWNER/team2"},
+			expectedMore:   10,
+		},
+		{
+			name: "copilot not available - not included",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SuggestedReviewerActorsForRepo\b`),
+					httpmock.StringResponse(mockReviewerResponseForRepoWithCopilot(3, 2, 5, 5, false)))
+			},
+			expectedCount:  5,
+			expectedLogins: []string{"c1", "c2", "c3", "OWNER/team1", "OWNER/team2"},
+			expectedMore:   10,
 		},
 	}
 
